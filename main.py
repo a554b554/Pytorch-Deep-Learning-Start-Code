@@ -7,14 +7,10 @@ import torch.utils.data
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as models
+from dataparser import parse_dataset
 import sys
-import csv
-import copy
+
 import numpy as np
-
-import matplotlib.pyplot as plt
-from scipy import interpolate
-
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
@@ -26,112 +22,243 @@ class AverageMeter(object):
         self.avg = 0
         self.sum = 0
         self.count = 0
+        self.max = 0
 
     def update(self, val, n=1):
         self.val = val
         self.sum += val * n
         self.count += n
+        if val > self.max:
+        	self.max = val
         self.avg = self.sum / self.count
 
-def train(train_loader, model, iters, batch_size):
+def train(train_loader, model, epochs, batch_size, validation_loader=None):
 		criterion = nn.MSELoss()
 		optimizer = torch.optim.SGD(model.parameters(), lr = 0.01, momentum=0.9)
 		losses = AverageMeter()
-
 		model.train()
-		for i in range(iters):
-			fs, ds = train_loader.sample(batch_size)
-			input_var = torch.autograd.Variable(ds)
-			target_var = torch.autograd.Variable(fs)
+		for ep in range(epochs):
+			train_loader.init_iter(batch_size)
+			n = train_loader.len()
+			for i, (x, y) in enumerate(train_loader):
+				input_var = torch.autograd.Variable(x)
+				target_var = torch.autograd.Variable(y)
 
-			output = model(input_var)
-			loss = criterion(output, target_var)
+				output = model(input_var)
+				loss = criterion(output, target_var)
 
-			losses.update(loss.data[0], fs.size(0))
+				losses.update(loss.data[0], x.size(0))
+				optimizer.zero_grad()
+				loss.backward()
+				optimizer.step()
+				if i%1000 == 0:
+					print('epoch:', ep,'/',epochs, 'iter:', i, '/', n, 'avg loss:', losses.avg, 'current loss:', loss.data[0])
 
-			optimizer.zero_grad()
-			loss.backward()
-			optimizer.step()
-			if i % 1000 == 0:
-				print('iter', i, '/', iters)
-				print('avg loss', losses.avg)
+			if validation_loader:
+				val_loss = validation(validation_loader, model)
+				print('validation loss:', val_loss.avg)
 
-
-
-
-# def validate(val_loader, model, criterion):
-#     batch_time = AverageMeter()
-#     losses = AverageMeter()
-#     top1 = AverageMeter()
-#     top5 = AverageMeter()
-
-#     # switch to evaluate mode
-#     model.eval()
-
-#     end = time.time()
-#     for i, (input, target) in enumerate(val_loader):
-#         target = target.cuda(async=True)
-#         input_var = torch.autograd.Variable(input, volatile=True)
-#         target_var = torch.autograd.Variable(target, volatile=True)
-
-#         # compute output
-#         output = model(input_var)
-#         loss = criterion(output, target_var)
-
-#         # measure accuracy and record loss
-#         prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
-#         losses.update(loss.data[0], input.size(0))
-#         top1.update(prec1[0], input.size(0))
-#         top5.update(prec5[0], input.size(0))
-
-#         # measure elapsed time
-#         batch_time.update(time.time() - end)
-#         end = time.time()
-
-#         if i % args.print_freq == 0:
-#             print('Test: [{0}/{1}]\t'
-#                   'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-#                   'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-#                   'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
-#                   'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
-#                    i, len(val_loader), batch_time=batch_time, loss=losses,
-#                    top1=top1, top5=top5))
-
-#     print(' * Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f}'
-#           .format(top1=top1, top5=top5))
-
-#     return top1.avg
-
-class data_loader:
-	def __init__(self, fs, ds):
-		pass
-
-	def sample(self, batch_size):
-		pass
 		return
 
-class ConvNet3D(nn.Module):
-	def __init__(self):
-		super(ConvNet3D, self).__init__()
-		self.features = nn.Sequential(
-			nn.Conv3d(9, 32, 3),
-			nn.ReLU(True), 
-			nn.Conv3d(32, 16, 3),
-			nn.ReLU(True))
+def validation(validation_loader, model):
+	criterion = nn.MSELoss()
+	losses = AverageMeter()
+	model.eval()
+	validation_loader.init_iter(10, shuffle=False)
+	for i, (x, y) in enumerate(validation_loader):
+		input_var = torch.autograd.Variable(x)
+		target_var = torch.autograd.Variable(y)
+		output = model(input_var)
+		loss = criterion(output, target_var)
+		losses.update(loss.data[0], x.size(0))
+		print('in:',input_var.data,'tar:',target_var.data,'out:',output.data*30000)
+		break
+	return losses
 
+#define your data loader here
+class DataLoader:
+	def __init__(self):
+		return
+
+	def load(self, filename):
+		self.x = torch.load(filename+'_x.pth')
+		self.y = torch.load(filename+'_y.pth')
+
+	def init_iter(self, batch_size, shuffle=True):
+		self.batch_size = batch_size
+		self.n = self.x.size(0)
+		perm = torch.LongTensor(range(self.n))
+		if shuffle:
+			perm = torch.randperm(self.n)
+
+		self.x = torch.index_select(self.x, 0, perm)
+		self.y = torch.index_select(self.y, 0, perm)
+	
+		return
+
+	def __iter__(self):
+		self.cid = 0
+		return self
+
+	def __next__(self):
+		if self.cid < self.n:
+			cid = self.cid
+			self.cid += self.batch_size
+			return self.x[cid:cid+self.batch_size, :], self.y[cid:cid+self.batch_size]
+		else:
+			raise StopIteration()
+
+	def len(self):
+		return int(self.n / self.batch_size)
+
+	def sample(self, batch_size):
+		perm = torch.randperm(self.x.size(0))
+		batch_index = perm[0:batch_size]
+		x_out = torch.index_select(self.x, 0, batch_index)
+		y_out = torch.index_select(self.y, 0, batch_index)
+		return x_out, y_out
+
+class dphiNet_bn(nn.Module):
+	def __init__(self):
+		super(dphiNet_bn, self).__init__()
 		self.lin = nn.Sequential(
-			nn.Linear(16*5*4*4, 256),
+			nn.Linear(9, 256),
+			nn.BatchNorm1d(256),
 			nn.ReLU(True),
 			nn.Dropout(0.5),
-			nn.Linear(256, 1))
+			nn.Linear(256, 256),
+			nn.BatchNorm1d(256),
+			nn.ReLU(True),
+			nn.Dropout(0.5),
+			nn.Linear(256, 128),
+			nn.BatchNorm1d(128),
+			nn.ReLU(True),
+			nn.Dropout(0.5),
+			nn.Linear(128, 6),
+			)
+		return
 
 	def forward(self, x):
-		x = self.features(x)
-		x = x.view(-1, 16*5*4*4)
 		x = self.lin(x)
 		return x
 
+class dphiNet(nn.Module):
+	def __init__(self):
+		super(dphiNet, self).__init__()
+		self.lin = nn.Sequential(
+			nn.Linear(9, 256),
+			# nn.BatchNorm1d(256),
+			nn.ReLU(True),
+			nn.Dropout(0.5),
+			nn.Linear(256, 256),
+			# nn.BatchNorm1d(256),
+			nn.ReLU(True),
+			nn.Dropout(0.5),
+			nn.Linear(256, 128),
+			# nn.BatchNorm1d(128),
+			nn.ReLU(True),
+			nn.Dropout(0.5),
+			nn.Linear(128, 6),
+			)
+		return
+
+	def forward(self, x):
+		x = self.lin(x)
+		return x
+
+class dphidrNet_bn(nn.Module):
+	def __init__(self):
+		super(dphidrNet_bn, self).__init__()
+		self.lin = nn.Sequential(
+			nn.Linear(5, 256),
+			nn.BatchNorm1d(256),
+			nn.ReLU(True),
+			nn.Dropout(0.5),
+			nn.Linear(256, 256),
+			nn.BatchNorm1d(256),
+			nn.ReLU(True),
+			nn.Dropout(0.5),
+			nn.Linear(256, 128),
+			nn.BatchNorm1d(128),
+			nn.ReLU(True),
+			nn.Dropout(0.5),
+			nn.Linear(128, 5),
+			)
+		return
+
+	def forward(self, x):
+		x = self.lin(x)
+		return x
+
+class Network:
+	def __init__(self):
+		self.network = dphidrNet_bn()
+		self.network.load_state_dict(torch.load('modeldphidr_bn.pth'))
+		self.network.eval()
+		return
+
+	def eval(self, input_array):
+		input_tensor = torch.FloatTensor(input_array)
+		input_tensor = input_tensor.view(-1, 5)
+		input_var = torch.autograd.Variable(input_tensor)
+		output_var = self.network(input_var)
+		output = output_var.data
+		output = output.view(-1)
+		output*=30000
+		return output.tolist()
+
+def test_input():
+	nn = Network()
+	print(nn.eval([0, 0, 1, 0, 1]))
+	return
+
+def test_validation():
+	validation_loader = DataLoader()
+	validation_loader.load('dphidrval')
+
+
+	model = dphidrNet_bn()
+	model.load_state_dict(torch.load('modeldphidr_bn.pth'))
+
+	validation(validation_loader, model)
 
 if __name__ == '__main__':
-	# parsecsv('../data/voltage.csv')
-	testinterp()
+
+
+	# test_input()
+	test_validation()
+	exit(0)
+
+	train_loader = DataLoader()
+	# train_loader.parsedata('../build_release/FOSSSim/woven_train/dphidr.txt')
+
+	# torch.save(train_loader.x, 'dphidrtrain_x.pth')
+	# torch.save(train_loader.y, 'dphidrtrain_y.pth')
+
+
+	validation_loader = DataLoader()
+	# validation_loader.parsedata('../build_release/FOSSSim/woven_train/dphidr_validate.txt')
+
+	# print(torch.min(train_loader.x), torch.max(train_loader.x))
+	# print(torch.min(train_loader.y), torch.max(train_loader.y))
+	# print(torch.min(validation_loader.y), torch.max(validation_loader.y))
+
+	# torch.save(validation_loader.x, 'dphidrval_x.pth')
+	# torch.save(validation_loader.y, 'dphidrval_y.pth')
+	# exit(0)
+
+	train_loader.load('dphidrtrain')
+	validation_loader.load('dphidrval')
+
+
+	# print(torch.min(train_loader.x), torch.max(train_loader.x))
+	# print(torch.min(train_loader.y), torch.max(train_loader.y))
+	# print(torch.min(validation_loader.y), torch.max(validation_loader.y))
+
+	model = dphidrNet_bn()
+	train(train_loader=train_loader, model=model, epochs=30, batch_size=1024, validation_loader = validation_loader)
+
+	# torch.save(model.state_dict(), 'modeldphidr_bn.pth')
+	# model.load_state_dict(torch.load('modeldphidr_bn.pth'))
+	# loss = validation(validation_loader, model)
+	# print(loss.max, loss.avg)
